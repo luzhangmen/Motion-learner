@@ -12,6 +12,9 @@ MHR网页查看器 - 在浏览器中查看3D人体模型
     - 支持多人体模型查看
     - 支持切换显示网格/骨架
     - 支持视频帧播放
+    - 播放/暂停、快进快退、速度调节
+    - 视角顺时针/逆时针旋转
+    - 进度标记和跳转功能
 """
 
 import argparse
@@ -151,6 +154,114 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             border-radius: 4px;
             text-align: center;
         }
+        /* 速度控制 */
+        #speed-control {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            color: #aaa;
+            font-size: 12px;
+        }
+        #speed-display {
+            min-width: 40px;
+            text-align: center;
+            color: #4fc3f7;
+            font-weight: bold;
+        }
+        /* 进度标记 */
+        #markers-panel {
+            position: absolute;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.8);
+            padding: 10px 15px;
+            border-radius: 8px;
+            display: none;
+            max-width: 600px;
+        }
+        #markers-panel h4 {
+            color: #4fc3f7;
+            margin-bottom: 8px;
+            font-size: 12px;
+        }
+        #markers-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            max-height: 100px;
+            overflow-y: auto;
+        }
+        .marker-item {
+            background: #333;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .marker-item:hover { background: #444; }
+        .marker-item .delete-marker {
+            color: #f44336;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .marker-item .delete-marker:hover { color: #ff6659; }
+        /* 帧跳转输入 */
+        #jump-control {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        #jump-input {
+            width: 60px;
+            background: #333;
+            border: 1px solid #555;
+            color: #fff;
+            padding: 4px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        #jump-btn {
+            padding: 4px 8px !important;
+            font-size: 12px !important;
+        }
+        /* 缩放控制 */
+        .zoom-controls {
+            display: flex;
+            gap: 5px;
+            margin-top: 5px;
+        }
+        .zoom-controls button {
+            flex: 1;
+            padding: 6px !important;
+            font-size: 16px !important;
+        }
+        /* 旋转控制 */
+        .rotate-controls {
+            display: flex;
+            gap: 5px;
+            margin-top: 5px;
+        }
+        .rotate-controls button {
+            flex: 1;
+            padding: 6px !important;
+            font-size: 14px !important;
+        }
+        /* 播放器扩展控制 */
+        .player-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 8px;
+        }
+        .player-separator {
+            width: 1px;
+            height: 20px;
+            background: #555;
+        }
     </style>
 </head>
 <body>
@@ -173,6 +284,15 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         <button id="btn-left">左侧视角</button>
         <button id="btn-right">右侧视角</button>
         <hr style="border-color:#444;margin:10px 0;">
+        <div class="zoom-controls">
+            <button id="btn-zoom-in" title="放大 (+)">+</button>
+            <button id="btn-zoom-out" title="缩小 (-)">-</button>
+        </div>
+        <div class="rotate-controls">
+            <button id="btn-rotate-ccw" title="逆时针旋转 (Q)">↺</button>
+            <button id="btn-rotate-cw" title="顺时针旋转 (E)">↻</button>
+        </div>
+        <hr style="border-color:#444;margin:10px 0;">
         <button id="btn-reset">重置视角</button>
         <button id="btn-lock" title="锁定视角后切换帧保持当前视角">锁定视角</button>
     </div>
@@ -181,17 +301,35 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         <div id="files"></div>
     </div>
 
+    <!-- 进度标记面板 -->
+    <div id="markers-panel">
+        <h4>进度标记 (M键添加)</h4>
+        <div id="markers-list"></div>
+    </div>
+
     <!-- 视频播放控制 -->
     <div id="player-controls">
-        <button id="btn-prev" title="上一帧">⏮</button>
-        <button id="btn-play" title="播放/暂停">▶</button>
-        <button id="btn-next" title="下一帧">⏭</button>
+        <button id="btn-fast-backward" title="快退5帧 (Shift+←)">⏪</button>
+        <button id="btn-prev" title="上一帧 (←)">⏮</button>
+        <button id="btn-play" title="播放/暂停 (空格)">▶</button>
+        <button id="btn-next" title="下一帧 (→)">⏭</button>
+        <button id="btn-fast-forward" title="快进5帧 (Shift+→)">⏩</button>
+        <div class="player-separator"></div>
         <input type="range" id="frame-slider" min="0" max="100" value="0">
         <span id="frame-info">0 / 0</span>
-        <div id="fps-control">
-            <label>FPS:</label>
-            <input type="number" id="fps-input" value="10" min="1" max="60">
+        <div class="player-separator"></div>
+        <div id="speed-control">
+            <button id="btn-speed-down" title="减速 ([)">-</button>
+            <span id="speed-display">1.0x</span>
+            <button id="btn-speed-up" title="加速 (])">+</button>
         </div>
+        <div class="player-separator"></div>
+        <div id="jump-control">
+            <input type="number" id="jump-input" placeholder="帧号" min="1">
+            <button id="jump-btn" title="跳转到指定帧">跳转</button>
+        </div>
+        <div class="player-separator"></div>
+        <button id="btn-marker" title="添加/显示标记 (M)">🔖</button>
     </div>
 
     <script type="importmap">
@@ -227,6 +365,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         let isPlaying = false;
         let playFPS = 10;
         let frameCache = {};
+        let playbackSpeed = 1.0;  // 播放速度倍率
+        let frameMarkers = [];    // 进度标记列表
+        const FAST_SKIP_FRAMES = 5;  // 快进快退帧数
 
         const SKELETON_CONNECTIONS = [
             [5, 6], [5, 7], [7, 9], [6, 8], [8, 10],
@@ -292,12 +433,34 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             // 初始化锁定按钮状态
             updateLockButton();
 
+            // 缩放控制
+            document.getElementById('btn-zoom-in').addEventListener('click', () => zoomCamera(0.8));
+            document.getElementById('btn-zoom-out').addEventListener('click', () => zoomCamera(1.25));
+
+            // 旋转控制
+            document.getElementById('btn-rotate-cw').addEventListener('click', () => rotateCamera(15));
+            document.getElementById('btn-rotate-ccw').addEventListener('click', () => rotateCamera(-15));
+
             // 播放器控制
             document.getElementById('btn-play').addEventListener('click', togglePlay);
             document.getElementById('btn-prev').addEventListener('click', prevFrame);
             document.getElementById('btn-next').addEventListener('click', nextFrame);
+            document.getElementById('btn-fast-forward').addEventListener('click', () => skipFrames(FAST_SKIP_FRAMES));
+            document.getElementById('btn-fast-backward').addEventListener('click', () => skipFrames(-FAST_SKIP_FRAMES));
             document.getElementById('frame-slider').addEventListener('input', onSliderChange);
-            document.getElementById('fps-input').addEventListener('change', onFPSChange);
+
+            // 速度控制
+            document.getElementById('btn-speed-up').addEventListener('click', () => changeSpeed(0.25));
+            document.getElementById('btn-speed-down').addEventListener('click', () => changeSpeed(-0.25));
+
+            // 帧跳转
+            document.getElementById('jump-btn').addEventListener('click', jumpToFrame);
+            document.getElementById('jump-input').addEventListener('keydown', (e) => {
+                if (e.code === 'Enter') jumpToFrame();
+            });
+
+            // 进度标记
+            document.getElementById('btn-marker').addEventListener('click', toggleMarkersPanel);
 
             // 键盘快捷键
             document.addEventListener('keydown', onKeyDown);
@@ -310,13 +473,31 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         }
 
         function onKeyDown(e) {
+            // 如果焦点在输入框上，不处理快捷键
+            if (e.target.tagName === 'INPUT') return;
+
+            // 通用快捷键
+            if (e.code === 'Equal' || e.code === 'NumpadAdd') { zoomCamera(0.8); return; }
+            if (e.code === 'Minus' || e.code === 'NumpadSubtract') { zoomCamera(1.25); return; }
+            if (e.code === 'KeyQ') { rotateCamera(-15); return; }
+            if (e.code === 'KeyE') { rotateCamera(15); return; }
+
+            // 视频模式快捷键
             if (!isVideoMode) return;
+
             if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+            else if (e.code === 'ArrowLeft' && e.shiftKey) { skipFrames(-FAST_SKIP_FRAMES); }
+            else if (e.code === 'ArrowRight' && e.shiftKey) { skipFrames(FAST_SKIP_FRAMES); }
             else if (e.code === 'ArrowLeft') { prevFrame(); }
             else if (e.code === 'ArrowRight') { nextFrame(); }
             else if (e.code === 'KeyL') { toggleLockCamera(); }
             else if (e.code === 'KeyF') { setViewAngle('front'); }
             else if (e.code === 'KeyB') { setViewAngle('back'); }
+            else if (e.code === 'BracketLeft') { changeSpeed(-0.25); }
+            else if (e.code === 'BracketRight') { changeSpeed(0.25); }
+            else if (e.code === 'KeyM') { addMarker(); }
+            else if (e.code === 'Home') { loadFrame(0); }
+            else if (e.code === 'End') { loadFrame(frameFiles.length - 1); }
         }
 
         // 保存当前相机状态
@@ -395,6 +576,163 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             }
         }
 
+        // 缩放相机
+        function zoomCamera(factor) {
+            const direction = new THREE.Vector3();
+            direction.subVectors(camera.position, controls.target);
+            direction.multiplyScalar(factor);
+            camera.position.copy(controls.target).add(direction);
+            controls.update();
+
+            if (lockCamera) {
+                saveCameraState();
+            }
+        }
+
+        // 旋转相机（水平方向）
+        function rotateCamera(degrees) {
+            const radians = degrees * Math.PI / 180;
+            const offset = new THREE.Vector3();
+            offset.subVectors(camera.position, controls.target);
+
+            // 绕Y轴旋转
+            const cos = Math.cos(radians);
+            const sin = Math.sin(radians);
+            const newX = offset.x * cos - offset.z * sin;
+            const newZ = offset.x * sin + offset.z * cos;
+
+            offset.x = newX;
+            offset.z = newZ;
+
+            camera.position.copy(controls.target).add(offset);
+            controls.update();
+
+            if (lockCamera) {
+                saveCameraState();
+            }
+        }
+
+        // 播放速度控制
+        function changeSpeed(delta) {
+            playbackSpeed = Math.max(0.25, Math.min(4.0, playbackSpeed + delta));
+            updateSpeedDisplay();
+        }
+
+        function updateSpeedDisplay() {
+            document.getElementById('speed-display').textContent = playbackSpeed.toFixed(2) + 'x';
+        }
+
+        // 快进快退
+        async function skipFrames(count) {
+            if (isPlaying) {
+                isPlaying = false;
+                document.getElementById('btn-play').textContent = '▶';
+                document.getElementById('btn-play').classList.remove('active');
+            }
+            if (isLoadingFrame) return;
+
+            isLoadingFrame = true;
+            let newIndex = currentFrameIndex + count;
+            // 循环或限制边界
+            if (newIndex < 0) newIndex = 0;
+            if (newIndex >= frameFiles.length) newIndex = frameFiles.length - 1;
+            await loadFrame(newIndex);
+            isLoadingFrame = false;
+        }
+
+        // 帧跳转
+        async function jumpToFrame() {
+            const input = document.getElementById('jump-input');
+            const frameNum = parseInt(input.value);
+            if (isNaN(frameNum) || frameNum < 1 || frameNum > frameFiles.length) {
+                input.style.borderColor = '#f44336';
+                setTimeout(() => { input.style.borderColor = '#555'; }, 1000);
+                return;
+            }
+
+            if (isPlaying) {
+                isPlaying = false;
+                document.getElementById('btn-play').textContent = '▶';
+                document.getElementById('btn-play').classList.remove('active');
+            }
+            if (isLoadingFrame) return;
+
+            isLoadingFrame = true;
+            await loadFrame(frameNum - 1);  // 用户输入从1开始
+            isLoadingFrame = false;
+            input.value = '';
+        }
+
+        // 进度标记功能
+        function addMarker() {
+            if (!isVideoMode) return;
+
+            // 检查是否已存在相同帧的标记
+            if (frameMarkers.includes(currentFrameIndex)) {
+                return;
+            }
+
+            frameMarkers.push(currentFrameIndex);
+            frameMarkers.sort((a, b) => a - b);
+            updateMarkersDisplay();
+            showMarkersPanel();
+        }
+
+        function removeMarker(index) {
+            const markerIndex = frameMarkers.indexOf(index);
+            if (markerIndex > -1) {
+                frameMarkers.splice(markerIndex, 1);
+                updateMarkersDisplay();
+            }
+        }
+
+        async function goToMarker(frameIndex) {
+            if (isPlaying) {
+                isPlaying = false;
+                document.getElementById('btn-play').textContent = '▶';
+                document.getElementById('btn-play').classList.remove('active');
+            }
+            if (isLoadingFrame) return;
+
+            isLoadingFrame = true;
+            await loadFrame(frameIndex);
+            isLoadingFrame = false;
+        }
+
+        function updateMarkersDisplay() {
+            const list = document.getElementById('markers-list');
+            if (frameMarkers.length === 0) {
+                list.innerHTML = '<span style="color:#666;font-size:12px;">暂无标记</span>';
+                return;
+            }
+
+            list.innerHTML = frameMarkers.map(idx =>
+                `<div class="marker-item">
+                    <span onclick="goToMarker(${idx})">帧 ${idx + 1}</span>
+                    <span class="delete-marker" onclick="removeMarker(${idx})">×</span>
+                </div>`
+            ).join('');
+
+            // 将函数暴露到全局
+            window.goToMarker = goToMarker;
+            window.removeMarker = removeMarker;
+        }
+
+        function toggleMarkersPanel() {
+            const panel = document.getElementById('markers-panel');
+            if (panel.style.display === 'none' || panel.style.display === '') {
+                showMarkersPanel();
+            } else {
+                panel.style.display = 'none';
+            }
+        }
+
+        function showMarkersPanel() {
+            const panel = document.getElementById('markers-panel');
+            panel.style.display = 'block';
+            updateMarkersDisplay();
+        }
+
         async function loadMHRData() {
             try {
                 // 检查是否是视频模式
@@ -440,7 +778,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
             // 设置FPS
             playFPS = videoInfo.fps || 10;
-            document.getElementById('fps-input').value = Math.round(playFPS);
+            updateSpeedDisplay();  // 更新速度显示
 
             // 加载共享的faces
             try {
@@ -514,7 +852,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             isLoadingFrame = false;
 
             if (isPlaying) {
-                setTimeout(playNextFrame, 1000 / playFPS);
+                setTimeout(playNextFrame, 1000 / (playFPS * playbackSpeed));
             }
         }
 
@@ -559,11 +897,6 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             isLoadingFrame = true;
             await loadFrame(parseInt(e.target.value));
             isLoadingFrame = false;
-        }
-
-        function onFPSChange(e) {
-            playFPS = Math.max(1, Math.min(60, parseInt(e.target.value) || 10));
-            e.target.value = playFPS;
         }
 
         function updateInfo() {
@@ -924,9 +1257,15 @@ def start_server(mhr_path, port=8080):
         print(f"网页查看器已启动!")
         print(f"打开浏览器访问: {url}")
         if video_info:
-            print(f"\n播放控制:")
+            print(f"\n播放控制快捷键:")
             print(f"  空格键: 播放/暂停")
             print(f"  左右箭头: 上一帧/下一帧")
+            print(f"  Shift+左右箭头: 快退/快进5帧")
+            print(f"  [ / ]: 减速/加速播放")
+            print(f"  M: 添加进度标记")
+        print(f"\n通用快捷键:")
+        print(f"  +/-: 放大/缩小")
+        print(f"  Q/E: 逆时针/顺时针旋转")
         print(f"\n按 Ctrl+C 停止服务器")
         print(f"{'='*50}\n")
 
