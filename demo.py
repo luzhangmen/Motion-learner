@@ -26,6 +26,8 @@ import socketserver
 import socket
 import shutil
 import base64
+import ssl
+import ipaddress
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from io import BytesIO
@@ -86,13 +88,26 @@ DEMO_HTML = '''<!DOCTYPE html>
             margin: 20px 0;
             cursor: pointer;
             transition: all 0.3s;
+            min-height: 200px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
         }
         .upload-area:hover, .upload-area.dragover {
             border-color: #4fc3f7;
             background: rgba(79, 195, 247, 0.1);
+            border-width: 3px;
         }
-        .upload-area input { display: none; }
-        .upload-icon { font-size: 48px; margin-bottom: 10px; }
+        .upload-area input { 
+            display: none; 
+            position: absolute;
+            width: 0;
+            height: 0;
+            opacity: 0;
+            pointer-events: none;
+        }
+        .upload-icon { font-size: 64px; margin-bottom: 15px; }
         
         .upload-btn {
             background: #4fc3f7;
@@ -331,6 +346,22 @@ DEMO_HTML = '''<!DOCTYPE html>
             color: #f44336;
             cursor: pointer;
         }
+        
+        /* 摄像头面板 */
+        #camera-panel {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.9);
+            padding: 40px;
+            border-radius: 16px;
+            text-align: center;
+            border: 2px dashed #66bb6a;
+            min-width: 700px;
+        }
+        #camera-panel.hidden { display: none; }
+        #camera-panel h2 { color: #66bb6a; margin-bottom: 20px; }
     </style>
 </head>
 <body>
@@ -343,20 +374,57 @@ DEMO_HTML = '''<!DOCTYPE html>
         
         <div class="upload-area" id="drop-area">
             <div class="upload-icon">📁</div>
-            <p>拖拽文件到这里，或点击选择</p>
-            <p style="font-size:12px;color:#666;">支持: JPG, PNG, MP4, AVI, MOV</p>
-            <input type="file" id="file-input" accept="image/*,video/*">
+            <p><strong>方式1: 拖拽文件到这里</strong></p>
+            <p style="font-size:14px;color:#888;margin:10px 0;">或</p>
+            <p><strong>方式2: 点击下方按钮选择文件</strong></p>
+            <p style="font-size:12px;color:#666;margin-top:15px;">支持格式: JPG, PNG, BMP, WEBP, MP4, AVI, MOV, MKV, WEBM</p>
+            <p style="font-size:11px;color:#555;margin-top:5px;">最大文件大小: 建议不超过500MB</p>
+            <input type="file" id="file-input" accept="image/*,video/*" style="position: absolute; width: 100%; height: 100%; top: 0; left: 0; opacity: 0; cursor: pointer; z-index: 10;">
         </div>
         
         <div class="options">
             <label>
                 <span>视频跳帧:</span>
                 <input type="number" id="frame-skip" value="0" min="0" max="10">
-                <span style="color:#666;margin-left:10px;">(0=不跳帧)</span>
+                <span style="color:#666;margin-left:10px;">(0=不跳帧, 适用于视频处理)</span>
             </label>
         </div>
         
-        <button class="upload-btn" id="select-btn">选择文件</button>
+        <div style="display: flex; gap: 10px; justify-content: center; margin-top: 20px;">
+            <button class="upload-btn" id="select-btn" style="flex: 1; max-width: 200px;">📤 选择文件上传</button>
+            <button class="upload-btn" id="camera-btn" style="background: #66bb6a; flex: 1; max-width: 200px;">📷 开启摄像头</button>
+        </div>
+        
+        <div style="margin-top: 20px; padding: 15px; background: rgba(79, 195, 247, 0.1); border-radius: 8px; border-left: 3px solid #4fc3f7;">
+            <p style="font-size: 12px; color: #81d4fa; margin: 0;">
+                <strong>💡 使用提示:</strong><br>
+                • 上传图片: 支持单张图片的3D重建<br>
+                • 上传视频: 支持逐帧处理，可设置跳帧以加快处理速度<br>
+                • 摄像头模式: 实时捕获并处理，支持手势控制
+            </p>
+        </div>
+    </div>
+    
+    <!-- 摄像头面板 -->
+    <div id="camera-panel" class="hidden">
+        <h2>摄像头模式</h2>
+        <p>使用手势控制3D模型</p>
+        <div style="position: relative; display: inline-block; margin: 20px 0;">
+            <video id="camera-video" autoplay playsinline style="width: 640px; height: 480px; background: #000; border-radius: 8px;"></video>
+            <canvas id="camera-canvas" style="position: absolute; top: 0; left: 0; width: 640px; height: 480px; pointer-events: none;"></canvas>
+        </div>
+        <div style="margin: 15px 0;">
+            <p style="color: #888; font-size: 14px; margin: 10px 0;">
+                <strong>手势说明:</strong><br>
+                👆 单指向上滑动 - 放大模型<br>
+                👇 单指向下滑动 - 缩小模型<br>
+                ✋ 手掌张开旋转 - 旋转模型<br>
+                👊 握拳 - 重置视角<br>
+                ✌️ 两指 - 切换显示模式
+            </p>
+        </div>
+        <button class="upload-btn" id="stop-camera-btn" style="background: #ef5350;">关闭摄像头</button>
+        <button class="upload-btn" id="capture-btn" style="background: #ffa726;">捕获并处理</button>
     </div>
     
     <!-- 进度面板 -->
@@ -446,6 +514,10 @@ DEMO_HTML = '''<!DOCTYPE html>
         }
     }
     </script>
+    <!-- MediaPipe Hands -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469404/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1620248257/drawing_utils.js" crossorigin="anonymous"></script>
 
     <script type="module">
         import * as THREE from 'three';
@@ -464,6 +536,20 @@ DEMO_HTML = '''<!DOCTYPE html>
         let frameCache = {}, playbackSpeed = 1.0, frameMarkers = [];
         let isLoadingFrame = false;
         const FAST_SKIP_FRAMES = 5;
+        
+        // 摄像头和手势识别相关
+        let cameraStream = null;
+        let hands = null;
+        let camera = null;
+        let isCameraMode = false;
+        let gestureState = {
+            lastHandPosition: null,
+            lastGestureTime: 0,
+            gestureCooldown: 500, // 手势冷却时间(ms)
+            zoomVelocity: 0,
+            rotateVelocity: 0,
+            lastFingerCount: 0
+        };
 
         const SKELETON_CONNECTIONS = [
             [5,6],[5,7],[7,9],[6,8],[8,10],[11,12],[5,11],[6,12],
@@ -524,25 +610,81 @@ DEMO_HTML = '''<!DOCTYPE html>
             renderer.render(scene, camera);
         }
 
-        // 文件上传
+        // 文件上传 - 确保DOM加载完成后再初始化
+        function initUploadHandlers() {
         const dropArea = document.getElementById('drop-area');
         const fileInput = document.getElementById('file-input');
         const selectBtn = document.getElementById('select-btn');
 
-        console.log('初始化上传组件...');
+            if (!dropArea || !fileInput || !selectBtn) {
+                console.error('上传组件元素未找到，重试中...');
+                setTimeout(initUploadHandlers, 100);
+                return;
+            }
 
-        selectBtn.onclick = (e) => {
+            console.log('初始化上传组件...', { dropArea, fileInput, selectBtn });
+
+            // 清除之前的事件监听器（如果有）
+            const newSelectBtn = selectBtn.cloneNode(true);
+            selectBtn.parentNode.replaceChild(newSelectBtn, selectBtn);
+            
+            const newFileInput = fileInput.cloneNode(true);
+            fileInput.parentNode.replaceChild(newFileInput, fileInput);
+
+            // 重新获取元素引用
+            const actualSelectBtn = document.getElementById('select-btn');
+            const actualFileInput = document.getElementById('file-input');
+            const actualDropArea = document.getElementById('drop-area');
+
+            // 绑定选择按钮事件
+            actualSelectBtn.addEventListener('click', (e) => {
+                e.preventDefault();
             e.stopPropagation();
             console.log('点击选择按钮');
-            fileInput.click();
-        };
+                try {
+                    // 确保文件输入框可见且可点击
+                    actualFileInput.style.display = 'block';
+                    actualFileInput.style.position = 'fixed';
+                    actualFileInput.style.top = '50%';
+                    actualFileInput.style.left = '50%';
+                    actualFileInput.style.transform = 'translate(-50%, -50%)';
+                    actualFileInput.style.zIndex = '9999';
+                    actualFileInput.style.opacity = '0.01';
+                    actualFileInput.style.width = '1px';
+                    actualFileInput.style.height = '1px';
+                    
+                    actualFileInput.click();
+                    console.log('文件选择对话框已触发');
 
-        dropArea.onclick = (e) => {
-            if (e.target === dropArea || e.target.closest('.upload-area')) {
+                    // 延迟后恢复样式
+                    setTimeout(() => {
+                        actualFileInput.style.cssText = 'position: absolute; width: 100%; height: 100%; top: 0; left: 0; opacity: 0; cursor: pointer; z-index: 10;';
+                    }, 100);
+                } catch (error) {
+                    console.error('触发文件选择失败:', error);
+                    alert('无法打开文件选择对话框。请尝试:\n1. 检查浏览器权限设置\n2. 尝试直接点击上传区域\n3. 使用拖拽方式上传\n\n错误: ' + error.message);
+                }
+            });
+
+            // 绑定上传区域点击事件（直接点击区域也可以选择文件）
+            actualDropArea.addEventListener('click', (e) => {
+                // 如果点击的是按钮，不处理（按钮有自己的事件）
+                if (e.target === actualSelectBtn || e.target.closest('#select-btn') || e.target.closest('#camera-btn')) {
+                    return;
+                }
+                // 如果点击的是文件输入框，不处理
+                if (e.target === actualFileInput) {
+                    return;
+                }
+                
                 console.log('点击上传区域');
-                fileInput.click();
+                try {
+                    actualFileInput.click();
+                    console.log('文件选择对话框已触发（通过区域点击）');
+                } catch (error) {
+                    console.error('触发文件选择失败:', error);
             }
-        };
+            });
 
         ['dragenter','dragover'].forEach(e => {
             dropArea.addEventListener(e, (ev) => {
@@ -559,7 +701,23 @@ DEMO_HTML = '''<!DOCTYPE html>
             });
         });
 
-        dropArea.addEventListener('drop', (e) => {
+            // 绑定拖拽事件
+            ['dragenter','dragover'].forEach(e => {
+                actualDropArea.addEventListener(e, (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    actualDropArea.classList.add('dragover');
+                });
+            });
+            ['dragleave','drop'].forEach(e => {
+                actualDropArea.addEventListener(e, (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    actualDropArea.classList.remove('dragover');
+                });
+            });
+
+            actualDropArea.addEventListener('drop', (e) => {
             console.log('文件拖放');
             const file = e.dataTransfer.files[0];
             if (file) {
@@ -568,13 +726,27 @@ DEMO_HTML = '''<!DOCTYPE html>
             }
         });
 
-        fileInput.addEventListener('change', (e) => {
+            // 绑定文件选择变化事件
+            actualFileInput.addEventListener('change', (e) => {
             console.log('文件选择变化');
-            if (fileInput.files[0]) {
-                console.log('选择文件:', fileInput.files[0].name);
-                handleFile(fileInput.files[0]);
+                if (actualFileInput.files && actualFileInput.files[0]) {
+                    console.log('选择文件:', actualFileInput.files[0].name);
+                    handleFile(actualFileInput.files[0]);
+                } else {
+                    console.log('未选择文件');
             }
         });
+
+            console.log('上传组件初始化完成');
+        }
+
+        // 在DOM加载完成后初始化
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initUploadHandlers);
+        } else {
+            // DOM已经加载完成
+            initUploadHandlers();
+        }
 
         async function handleFile(file) {
             console.log('=== 开始上传文件 ===');
@@ -582,28 +754,59 @@ DEMO_HTML = '''<!DOCTYPE html>
             console.log('文件大小:', file.size, 'bytes');
             console.log('文件类型:', file.type);
 
+            // 检查文件大小 (500MB限制)
+            const maxSize = 500 * 1024 * 1024; // 500MB
+            if (file.size > maxSize) {
+                alert(`文件太大！最大支持500MB，当前文件: ${(file.size / 1024 / 1024).toFixed(2)}MB`);
+                return;
+            }
+
+            // 检查文件类型
+            const validImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/bmp', 'image/webp'];
+            const validVideoTypes = ['video/mp4', 'video/avi', 'video/quicktime', 'video/x-matroska', 'video/webm'];
+            const fileExt = file.name.toLowerCase().split('.').pop();
+            const validExts = ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'mp4', 'avi', 'mov', 'mkv', 'webm'];
+            
+            if (!validExts.includes(fileExt) && !validImageTypes.includes(file.type) && !validVideoTypes.includes(file.type)) {
+                alert('不支持的文件格式！\n支持的格式: JPG, PNG, BMP, WEBP, MP4, AVI, MOV, MKV, WEBM');
+                return;
+            }
+
             const formData = new FormData();
             formData.append('file', file);
             formData.append('frame_skip', document.getElementById('frame-skip').value);
 
             document.getElementById('upload-panel').classList.add('hidden');
             document.getElementById('progress-panel').style.display = 'block';
-            document.getElementById('progress-text').textContent = '正在上传文件...';
+            document.getElementById('progress-text').textContent = `正在上传文件: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)}MB)...`;
 
             try {
                 const uploadUrl = window.location.origin + '/api/upload';
                 console.log('发送POST请求到:', uploadUrl);
 
+                // 添加超时处理
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 300000); // 5分钟超时
+
                 const response = await fetch(uploadUrl, {
                     method: 'POST',
-                    body: formData
+                    body: formData,
+                    signal: controller.signal
                 });
 
+                clearTimeout(timeoutId);
                 console.log('响应状态:', response.status);
 
                 if (!response.ok) {
                     const errText = await response.text();
-                    throw new Error('上传失败: ' + response.status + ' - ' + errText);
+                    let errorMsg = '上传失败';
+                    try {
+                        const errJson = JSON.parse(errText);
+                        errorMsg = errJson.error || errorMsg;
+                    } catch {
+                        errorMsg = errText || `HTTP ${response.status}`;
+                    }
+                    throw new Error(errorMsg);
                 }
 
                 const result = await response.json();
@@ -613,8 +816,16 @@ DEMO_HTML = '''<!DOCTYPE html>
                 pollProgress();
             } catch (error) {
                 console.error('上传错误:', error);
-                console.error('错误详情:', error.message);
-                alert('上传失败: ' + error.message);
+                let errorMsg = '上传失败';
+                if (error.name === 'AbortError') {
+                    errorMsg = '上传超时，请检查网络连接或文件大小';
+                } else if (error.message) {
+                    errorMsg = error.message;
+                } else {
+                    errorMsg = '网络错误，请检查连接';
+                }
+                
+                alert(errorMsg + '\n\n如果问题持续，请尝试:\n1. 检查网络连接\n2. 减小文件大小\n3. 使用支持的格式');
                 document.getElementById('upload-panel').classList.remove('hidden');
                 document.getElementById('progress-panel').style.display = 'none';
             }
@@ -1018,6 +1229,313 @@ DEMO_HTML = '''<!DOCTYPE html>
         document.getElementById('btn-new').onclick = () => {
             location.reload();
         };
+        
+        // 摄像头相关功能
+        document.getElementById('camera-btn').onclick = startCamera;
+        document.getElementById('stop-camera-btn').onclick = stopCamera;
+        document.getElementById('capture-btn').onclick = captureAndProcess;
+        
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: 640, height: 480 } 
+                });
+                cameraStream = stream;
+                const video = document.getElementById('camera-video');
+                video.srcObject = stream;
+                
+                document.getElementById('upload-panel').classList.add('hidden');
+                document.getElementById('camera-panel').classList.remove('hidden');
+                isCameraMode = true;
+                
+                // 等待视频加载
+                await new Promise((resolve) => {
+                    video.onloadedmetadata = () => {
+                        video.play();
+                        resolve();
+                    };
+                });
+                
+                // 初始化MediaPipe Hands
+                // 等待MediaPipe库加载
+                let retries = 0;
+                const initMediaPipe = () => {
+                    if (typeof Hands !== 'undefined') {
+                        if (!hands) {
+                            try {
+                                hands = new Hands({
+                                    locateFile: (file) => {
+                                        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                                    }
+                                });
+                                hands.setOptions({
+                                    maxNumHands: 1,
+                                    modelComplexity: 1,
+                                    minDetectionConfidence: 0.5,
+                                    minTrackingConfidence: 0.5
+                                });
+                                hands.onResults(onHandResults);
+                                
+                                // 启动摄像头处理
+                                if (typeof Camera !== 'undefined') {
+                                    camera = new Camera(video, {
+                                        onFrame: async () => {
+                                            await hands.send({image: video});
+                                        },
+                                        width: 640,
+                                        height: 480
+                                    });
+                                    camera.start();
+                                } else {
+                                    // 如果Camera类不可用，使用requestAnimationFrame
+                                    processCameraFrame();
+                                }
+                            } catch (error) {
+                                console.error('MediaPipe初始化失败:', error);
+                                processCameraFrameBasic();
+                            }
+                        }
+                    } else if (retries < 10) {
+                        retries++;
+                        setTimeout(initMediaPipe, 100);
+                    } else {
+                        console.warn('MediaPipe Hands未加载，使用基础手势检测');
+                        processCameraFrameBasic();
+                    }
+                };
+                initMediaPipe();
+                
+            } catch (error) {
+                console.error('无法访问摄像头:', error);
+                alert('无法访问摄像头，请检查权限设置');
+            }
+        }
+        
+        function processCameraFrame() {
+            if (!isCameraMode || !cameraStream) return;
+            const video = document.getElementById('camera-video');
+            if (video.readyState === video.HAVE_ENOUGH_DATA && hands) {
+                hands.send({image: video});
+            }
+            requestAnimationFrame(processCameraFrame);
+        }
+        
+        function processCameraFrameBasic() {
+            if (!isCameraMode || !cameraStream) return;
+            const video = document.getElementById('camera-video');
+            const canvas = document.getElementById('camera-canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 640;
+            canvas.height = 480;
+            ctx.drawImage(video, 0, 0, 640, 480);
+            requestAnimationFrame(processCameraFrameBasic);
+        }
+        
+        function stopCamera() {
+            if (camera) {
+                camera.stop();
+                camera = null;
+            }
+            if (cameraStream) {
+                cameraStream.getTracks().forEach(track => track.stop());
+                cameraStream = null;
+            }
+            document.getElementById('camera-panel').classList.add('hidden');
+            document.getElementById('upload-panel').classList.remove('hidden');
+            isCameraMode = false;
+            gestureState = {
+                lastHandPosition: null,
+                lastGestureTime: 0,
+                gestureCooldown: 500,
+                zoomVelocity: 0,
+                rotateVelocity: 0,
+                lastFingerCount: 0
+            };
+        }
+        
+        async function captureAndProcess() {
+            if (!cameraStream) return;
+            
+            const video = document.getElementById('camera-video');
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0);
+            
+            canvas.toBlob(async (blob) => {
+                const file = new File([blob], 'camera_capture.jpg', { type: 'image/jpeg' });
+                stopCamera();
+                await handleFile(file);
+            }, 'image/jpeg', 0.95);
+        }
+        
+        function onHandResults(results) {
+            const canvas = document.getElementById('camera-canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 640;
+            canvas.height = 480;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                const handedness = results.multiHandedness ? results.multiHandedness[0] : null;
+                
+                // 绘制手部关键点
+                drawConnectors(ctx, landmarks, HAND_CONNECTIONS_GESTURE, {color: '#00FF00', lineWidth: 2});
+                drawLandmarks(ctx, landmarks, {color: '#FF0000', lineWidth: 1, radius: 3});
+                
+                // 处理手势
+                processGesture(landmarks, handedness);
+            }
+        }
+        
+        function processGesture(landmarks, handedness) {
+            if (!meshes || meshes.length === 0) return;
+            
+            const now = Date.now();
+            if (now - gestureState.lastGestureTime < gestureState.gestureCooldown) {
+                return;
+            }
+            
+            // 计算手指数量
+            const fingerCount = countFingers(landmarks);
+            
+            // 获取手掌中心位置
+            const wrist = landmarks[0];
+            const middleMCP = landmarks[9];
+            const handCenter = {
+                x: (wrist.x + middleMCP.x) / 2,
+                y: (wrist.y + middleMCP.y) / 2
+            };
+            
+            // 手势1: 单指向上/下 - 缩放
+            if (fingerCount === 1) {
+                if (gestureState.lastHandPosition) {
+                    const dy = handCenter.y - gestureState.lastHandPosition.y;
+                    if (Math.abs(dy) > 0.02) {
+                        if (dy < 0) {
+                            // 向上滑动 - 放大
+                            zoomCamera(0.9);
+                        } else {
+                            // 向下滑动 - 缩小
+                            zoomCamera(1.1);
+                        }
+                        gestureState.lastGestureTime = now;
+                    }
+                }
+            }
+            
+            // 手势2: 手掌张开旋转 - 旋转模型
+            if (fingerCount === 5) {
+                if (gestureState.lastHandPosition) {
+                    const dx = handCenter.x - gestureState.lastHandPosition.x;
+                    const dy = handCenter.y - gestureState.lastHandPosition.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    
+                    if (distance > 0.03) {
+                        // 计算旋转角度（基于水平移动）
+                        const angle = dx * 30; // 放大旋转效果
+                        rotateCamera(angle);
+                        gestureState.lastGestureTime = now;
+                    }
+                }
+            }
+            
+            // 手势3: 握拳 - 重置视角
+            if (fingerCount === 0 && gestureState.lastFingerCount > 0) {
+                fitCameraToMeshes();
+                saveCameraState();
+                gestureState.lastGestureTime = now;
+            }
+            
+            // 手势4: 两指 - 切换显示模式
+            if (fingerCount === 2 && gestureState.lastFingerCount !== 2) {
+                // 循环切换: mesh -> wireframe -> skeleton -> mesh
+                if (showMesh && !showWireframe && !showSkeleton) {
+                    showMesh = false;
+                    showWireframe = true;
+                    document.getElementById('btn-wireframe').classList.add('active');
+                    document.getElementById('btn-mesh').classList.remove('active');
+                } else if (showWireframe) {
+                    showWireframe = false;
+                    showSkeleton = true;
+                    document.getElementById('btn-skeleton').classList.add('active');
+                    document.getElementById('btn-wireframe').classList.remove('active');
+                } else {
+                    showSkeleton = false;
+                    showMesh = true;
+                    document.getElementById('btn-mesh').classList.add('active');
+                    document.getElementById('btn-skeleton').classList.remove('active');
+                }
+                applyViewSettings();
+                gestureState.lastGestureTime = now;
+            }
+            
+            gestureState.lastHandPosition = handCenter;
+            gestureState.lastFingerCount = fingerCount;
+        }
+        
+        function countFingers(landmarks) {
+            // MediaPipe Hands的21个关键点索引
+            // 0: 手腕, 1-4: 拇指, 5-8: 食指, 9-12: 中指, 13-16: 无名指, 17-20: 小指
+            const fingerTips = [4, 8, 12, 16, 20];
+            const fingerPIPs = [3, 6, 10, 14, 18];
+            const thumbIP = 2;
+            const thumbMCP = 1;
+            
+            let count = 0;
+            
+            // 拇指：检查x坐标（拇指是横向的）
+            if (landmarks[4].x > landmarks[3].x) {
+                count++;
+            }
+            
+            // 其他四指：检查y坐标
+            for (let i = 1; i < 5; i++) {
+                const tipIdx = fingerTips[i];
+                const pipIdx = fingerPIPs[i];
+                if (landmarks[tipIdx].y < landmarks[pipIdx].y) {
+                    count++;
+                }
+            }
+            
+            return count;
+        }
+        
+        // MediaPipe Hands连接定义（用于手势识别绘制）
+        const HAND_CONNECTIONS_GESTURE = [
+            [0, 1], [1, 2], [2, 3], [3, 4],
+            [0, 5], [5, 6], [6, 7], [7, 8],
+            [0, 9], [9, 10], [10, 11], [11, 12],
+            [0, 13], [13, 14], [14, 15], [15, 16],
+            [0, 17], [17, 18], [18, 19], [19, 20],
+            [5, 9], [9, 13], [13, 17]
+        ];
+        
+        // MediaPipe绘制函数（简化版）
+        function drawConnectors(ctx, points, connections, options) {
+            ctx.strokeStyle = options.color || '#00FF00';
+            ctx.lineWidth = options.lineWidth || 2;
+            ctx.beginPath();
+            for (const [start, end] of connections) {
+                if (start < points.length && end < points.length) {
+                    ctx.moveTo(points[start].x * 640, points[start].y * 480);
+                    ctx.lineTo(points[end].x * 640, points[end].y * 480);
+                }
+            }
+            ctx.stroke();
+        }
+        
+        function drawLandmarks(ctx, points, options) {
+            ctx.fillStyle = options.color || '#FF0000';
+            for (const point of points) {
+                ctx.beginPath();
+                ctx.arc(point.x * 640, point.y * 480, options.radius || 3, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+        }
 
         // 键盘快捷键
         document.addEventListener('keydown', (e) => {
@@ -1503,16 +2021,127 @@ def find_free_port(start_port=8080):
     return start_port
 
 
+def generate_self_signed_cert(cert_path, key_path):
+    """生成自签名证书"""
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.backends import default_backend
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives import serialization
+        import datetime
+        
+        # 生成私钥
+        key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend()
+        )
+        
+        # 获取本机IP
+        import subprocess
+        try:
+            result = subprocess.run(['hostname', '-I'], capture_output=True, text=True)
+            local_ip = result.stdout.strip().split()[0] if result.stdout.strip() else '127.0.0.1'
+        except:
+            local_ip = '127.0.0.1'
+        
+        # 生成证书
+        subject = issuer = x509.Name([
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "CN"),
+            x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Beijing"),
+            x509.NameAttribute(NameOID.LOCALITY_NAME, "Beijing"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "SAM3D Demo"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
+        ])
+        
+        # 添加 SAN (Subject Alternative Name) 以支持 IP 访问
+        san = x509.SubjectAlternativeName([
+            x509.DNSName("localhost"),
+            x509.DNSName("*.localhost"),
+            x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+            x509.IPAddress(ipaddress.ip_address(local_ip)),
+        ])
+        
+        cert = x509.CertificateBuilder().subject_name(
+            subject
+        ).issuer_name(
+            issuer
+        ).public_key(
+            key.public_key()
+        ).serial_number(
+            x509.random_serial_number()
+        ).not_valid_before(
+            datetime.datetime.utcnow()
+        ).not_valid_after(
+            datetime.datetime.utcnow() + datetime.timedelta(days=365)
+        ).add_extension(
+            san, critical=False
+        ).sign(key, hashes.SHA256(), default_backend())
+        
+        # 保存私钥
+        with open(key_path, "wb") as f:
+            f.write(key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption()
+            ))
+        
+        # 保存证书
+        with open(cert_path, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        
+        print(f"已生成自签名证书:")
+        print(f"  证书: {cert_path}")
+        print(f"  私钥: {key_path}")
+        print(f"  包含 SAN: localhost, 127.0.0.1, {local_ip}")
+        return True
+        
+    except ImportError:
+        print("错误: 需要安装 cryptography 库来生成证书")
+        print("请运行: pip install cryptography")
+        print("或者手动生成证书:")
+        print("  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="3D人体重建 Demo")
     parser.add_argument("--port", type=int, default=8080, help="服务器端口")
     parser.add_argument("--output", default="./output", help="输出目录")
     parser.add_argument("--host", default="0.0.0.0", help="监听地址 (默认: 0.0.0.0)")
+    parser.add_argument("--ssl", action="store_true", help="启用HTTPS (需要证书)")
+    parser.add_argument("--cert", default="cert.pem", help="SSL证书文件路径 (默认: cert.pem)")
+    parser.add_argument("--key", default="key.pem", help="SSL私钥文件路径 (默认: key.pem)")
+    parser.add_argument("--auto-cert", action="store_true", help="自动生成自签名证书 (需要cryptography库)")
     args = parser.parse_args()
 
     global output_folder
     output_folder = Path(args.output)
     output_folder.mkdir(parents=True, exist_ok=True)
+
+    # 处理SSL证书
+    use_ssl = args.ssl or args.auto_cert
+    if use_ssl:
+        cert_path = Path(args.cert)
+        key_path = Path(args.key)
+        
+        # 如果证书不存在且指定了自动生成
+        if args.auto_cert and (not cert_path.exists() or not key_path.exists()):
+            if not generate_self_signed_cert(str(cert_path), str(key_path)):
+                print("无法生成证书，退出")
+                sys.exit(1)
+        
+        # 检查证书文件是否存在
+        if not cert_path.exists():
+            print(f"错误: 证书文件不存在: {cert_path}")
+            print("请使用 --auto-cert 自动生成，或手动创建证书:")
+            print("  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes")
+            sys.exit(1)
+        if not key_path.exists():
+            print(f"错误: 私钥文件不存在: {key_path}")
+            sys.exit(1)
 
     port = find_free_port(args.port)
 
@@ -1529,17 +2158,28 @@ def main():
         allow_reuse_address = True
         daemon_threads = True
 
+    protocol = "https" if use_ssl else "http"
+    
     with ThreadedTCPServer((args.host, port), DemoHandler) as httpd:
+        # 如果启用SSL，包装socket
+        if use_ssl:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile=args.cert, keyfile=args.key)
+            httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+        
         print(f"\n{'='*50}")
         print(f"3D人体重建 Demo 已启动!")
-        print(f"\n本地访问: http://localhost:{port}")
-        print(f"远程访问: http://{local_ip}:{port}")
+        if use_ssl:
+            print(f"\n[HTTPS模式] 摄像头功能可在远程使用")
+            print(f"注意: 自签名证书需要在浏览器中手动信任")
+        print(f"\n本地访问: {protocol}://localhost:{port}")
+        print(f"远程访问: {protocol}://{local_ip}:{port}")
         print(f"\n按 Ctrl+C 停止服务器")
         print(f"{'='*50}\n")
 
         # 只在本地时自动打开浏览器
         if args.host in ('localhost', '127.0.0.1'):
-            threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{port}")).start()
+            threading.Timer(1.0, lambda: webbrowser.open(f"{protocol}://localhost:{port}")).start()
 
         try:
             httpd.serve_forever()
